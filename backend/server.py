@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter
+from fastapi import FastAPI, APIRouter, Query, HTTPException
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -6,10 +6,11 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List
+from typing import List, Optional
 import uuid
-from datetime import datetime, timezone
-
+from datetime import datetime, timezone, timedelta
+import httpx
+import asyncio
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -19,54 +20,510 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
 app = FastAPI()
-
-# Create a router with the /api prefix
 api_router = APIRouter(prefix="/api")
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
+# ─── Models ───────────────────────────────────────────────────────────────────
+
+class CompanyCreate(BaseModel):
+    company_slug: str
+    company_name: str
+    ats_type: str
+    api_url: str
+    is_active: bool = True
+
+class CompanyUpdate(BaseModel):
+    company_name: Optional[str] = None
+    ats_type: Optional[str] = None
+    api_url: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class CompanyResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    company_slug: str
+    company_name: str
+    ats_type: str
+    api_url: str
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+class JobResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    company_slug: str
+    source_ats: str
+    job_id: str
+    title: str
+    location: str
+    is_remote: bool
+    department: Optional[str] = None
+    employment_type: Optional[str] = None
+    posted_at: Optional[str] = None
+    job_url: str
+    first_seen_at: str
+    last_seen_at: str
+    is_active: bool
+
+class JobsListResponse(BaseModel):
+    data: List[JobResponse]
+    meta: dict
+
+class CrawlResponse(BaseModel):
+    status: str
+    companies_processed: int
+    new_jobs_total: int
+
+# ─── ATS Adapters ─────────────────────────────────────────────────────────────
+
+async def fetch_with_retry(url: str, retries: int = 1, timeout: float = 30.0) -> Optional[dict]:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as http_client:
+        for attempt in range(retries + 1):
+            try:
+                resp = await http_client.get(url)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                logger.warning(f"Fetch attempt {attempt+1} failed for {url}: {e}")
+                if attempt < retries:
+                    await asyncio.sleep(1)
+    return None
+
+def normalize_greenhouse_jobs(company_slug: str, data: dict) -> list:
+    jobs = data.get("jobs", [])
+    normalized = []
+    for job in jobs:
+        loc = ""
+        if job.get("location"):
+            loc = job["location"].get("name", "") if isinstance(job["location"], dict) else str(job["location"])
+        
+        is_remote = "remote" in loc.lower() if loc else False
+        
+        department = None
+        if job.get("departments") and len(job["departments"]) > 0:
+            department = job["departments"][0].get("name")
+        
+        posted_at = job.get("updated_at") or job.get("created_at")
+        
+        normalized.append({
+            "source_ats": "greenhouse",
+            "company_slug": company_slug,
+            "job_id": str(job.get("id", "")),
+            "title": job.get("title", ""),
+            "location": loc,
+            "is_remote": is_remote,
+            "department": department,
+            "employment_type": None,
+            "posted_at": posted_at,
+            "job_url": job.get("absolute_url", ""),
+            "raw": job,
+        })
+    return normalized
+
+def normalize_lever_jobs(company_slug: str, data) -> list:
+    if not isinstance(data, list):
+        return []
+    normalized = []
+    for job in data:
+        categories = job.get("categories", {})
+        loc = categories.get("location", "") or ""
+        tags = job.get("tags", [])
+        
+        is_remote = "remote" in loc.lower() or any("remote" in t.lower() for t in tags)
+        
+        department = categories.get("team")
+        
+        created_ms = job.get("createdAt")
+        posted_at = None
+        if created_ms:
+            posted_at = datetime.fromtimestamp(created_ms / 1000, tz=timezone.utc).isoformat()
+        
+        normalized.append({
+            "source_ats": "lever",
+            "company_slug": company_slug,
+            "job_id": str(job.get("id", "")),
+            "title": job.get("text", ""),
+            "location": loc,
+            "is_remote": is_remote,
+            "department": department,
+            "employment_type": categories.get("commitment"),
+            "posted_at": posted_at,
+            "job_url": job.get("hostedUrl", ""),
+            "raw": job,
+        })
+    return normalized
+
+def normalize_ashby_jobs(company_slug: str, data: dict) -> list:
+    jobs = data.get("jobs", [])
+    normalized = []
+    for job in jobs:
+        loc = job.get("location", "") or ""
+        is_remote = job.get("isRemote", False) or ("remote" in loc.lower())
+        
+        department = job.get("departmentName") or job.get("department")
+        employment_type = job.get("employmentType")
+        posted_at = job.get("publishedAt") or job.get("createdAt")
+        
+        job_url = job.get("jobUrl", "")
+        if not job_url and job.get("id"):
+            job_url = f"https://jobs.ashbyhq.com/{company_slug}/{job['id']}"
+        
+        normalized.append({
+            "source_ats": "ashby",
+            "company_slug": company_slug,
+            "job_id": str(job.get("id", "")),
+            "title": job.get("title", ""),
+            "location": loc,
+            "is_remote": is_remote,
+            "department": department,
+            "employment_type": employment_type,
+            "posted_at": posted_at,
+            "job_url": job_url,
+            "raw": job,
+        })
+    return normalized
+
+def normalize_workday_jobs(company_slug: str, data: dict) -> list:
+    job_postings = data.get("jobPostings", [])
+    normalized = []
+    for job in job_postings:
+        loc = job.get("locationsText", "") or ""
+        if not loc:
+            locs = job.get("locations", [])
+            if locs:
+                loc = ", ".join(locs) if isinstance(locs, list) else str(locs)
+        
+        is_remote = job.get("remote", False) or ("remote" in loc.lower())
+        
+        posted_at = job.get("postedOn") or job.get("posted")
+        
+        external_url = job.get("externalUrl", "") or job.get("externalPath", "")
+        
+        normalized.append({
+            "source_ats": "workday",
+            "company_slug": company_slug,
+            "job_id": str(job.get("bulletFields", [job.get("id", "")])[0] if job.get("bulletFields") else job.get("id", "")),
+            "title": job.get("title", ""),
+            "location": loc,
+            "is_remote": is_remote,
+            "department": None,
+            "employment_type": None,
+            "posted_at": posted_at,
+            "job_url": external_url,
+            "raw": job,
+        })
+    return normalized
+
+async def fetch_and_normalize(company: dict) -> list:
+    ats_type = company["ats_type"]
+    api_url = company["api_url"]
+    slug = company["company_slug"]
     
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    if ats_type == "workday":
+        # Workday uses POST requests
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+                payload = {"limit": 20, "offset": 0, "appliedFacets": {}, "searchText": ""}
+                resp = await http_client.post(api_url, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                return normalize_workday_jobs(slug, data)
+        except Exception as e:
+            logger.error(f"Failed to fetch Workday jobs for {slug}: {e}")
+            return []
+    
+    data = await fetch_with_retry(api_url)
+    if data is None:
+        logger.error(f"Failed to fetch jobs for {slug} ({ats_type})")
+        return []
+    
+    if ats_type == "greenhouse":
+        return normalize_greenhouse_jobs(slug, data)
+    elif ats_type == "lever":
+        return normalize_lever_jobs(slug, data)
+    elif ats_type == "ashby":
+        return normalize_ashby_jobs(slug, data)
+    else:
+        logger.warning(f"Unsupported ATS type: {ats_type} for {slug}")
+        return []
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+# ─── Upsert Logic ─────────────────────────────────────────────────────────────
 
-# Add your routes to the router instead of directly to app
+async def upsert_jobs_and_get_new(company: dict, normalized_jobs: list) -> list:
+    new_jobs = []
+    now = datetime.now(timezone.utc).isoformat()
+    
+    for job in normalized_jobs:
+        existing = await db.jobs.find_one(
+            {
+                "company_slug": job["company_slug"],
+                "source_ats": job["source_ats"],
+                "job_id": job["job_id"],
+            },
+            {"_id": 0, "first_seen_at": 1}
+        )
+        
+        if existing is None:
+            doc = {
+                "id": str(uuid.uuid4()),
+                "company_id": company["id"],
+                "company_slug": job["company_slug"],
+                "source_ats": job["source_ats"],
+                "job_id": job["job_id"],
+                "title": job["title"],
+                "location": job["location"],
+                "is_remote": job["is_remote"],
+                "department": job.get("department"),
+                "employment_type": job.get("employment_type"),
+                "posted_at": job.get("posted_at"),
+                "job_url": job["job_url"],
+                "raw": job.get("raw", {}),
+                "first_seen_at": now,
+                "last_seen_at": now,
+                "is_active": True,
+            }
+            await db.jobs.insert_one(doc)
+            new_jobs.append(job)
+        else:
+            await db.jobs.update_one(
+                {
+                    "company_slug": job["company_slug"],
+                    "source_ats": job["source_ats"],
+                    "job_id": job["job_id"],
+                },
+                {"$set": {
+                    "title": job["title"],
+                    "location": job["location"],
+                    "is_remote": job["is_remote"],
+                    "department": job.get("department"),
+                    "employment_type": job.get("employment_type"),
+                    "posted_at": job.get("posted_at"),
+                    "job_url": job["job_url"],
+                    "raw": job.get("raw", {}),
+                    "last_seen_at": now,
+                }}
+            )
+    return new_jobs
+
+# ─── Endpoints ─────────────────────────────────────────────────────────────────
+
 @api_router.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"message": "ATS Pulse API"}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+# --- Companies ---
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+@api_router.get("/companies", response_model=List[CompanyResponse])
+async def list_companies():
+    companies = await db.companies.find({}, {"_id": 0}).to_list(500)
+    return companies
 
-# Include the router in the main app
+@api_router.post("/companies", response_model=CompanyResponse)
+async def create_company(payload: CompanyCreate):
+    existing = await db.companies.find_one({"company_slug": payload.company_slug}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=409, detail="Company slug already exists")
+    
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "company_slug": payload.company_slug,
+        "company_name": payload.company_name,
+        "ats_type": payload.ats_type,
+        "api_url": payload.api_url,
+        "is_active": payload.is_active,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.companies.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.patch("/companies/{company_id}", response_model=CompanyResponse)
+async def update_company(company_id: str, payload: CompanyUpdate):
+    update_fields = {k: v for k, v in payload.model_dump().items() if v is not None}
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    
+    update_fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.companies.find_one_and_update(
+        {"id": company_id},
+        {"$set": update_fields},
+        return_document=True,
+        projection={"_id": 0}
+    )
+    if not result:
+        raise HTTPException(status_code=404, detail="Company not found")
+    return result
+
+@api_router.delete("/companies/{company_id}")
+async def delete_company(company_id: str):
+    result = await db.companies.delete_one({"id": company_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Company not found")
+    await db.jobs.delete_many({"company_id": company_id})
+    return {"status": "deleted"}
+
+# --- Internal Crawl ---
+
+@api_router.post("/internal/crawl", response_model=CrawlResponse)
+async def trigger_crawl():
+    companies = await db.companies.find({"is_active": True}, {"_id": 0}).to_list(500)
+    total_new = 0
+    
+    for company in companies:
+        try:
+            normalized = await fetch_and_normalize(company)
+            new_jobs = await upsert_jobs_and_get_new(company, normalized)
+            total_new += len(new_jobs)
+            logger.info(f"Crawled {company['company_slug']}: {len(normalized)} jobs, {len(new_jobs)} new")
+        except Exception as e:
+            logger.error(f"Error crawling {company['company_slug']}: {e}")
+    
+    return CrawlResponse(status="ok", companies_processed=len(companies), new_jobs_total=total_new)
+
+# --- Jobs ---
+
+@api_router.get("/jobs", response_model=JobsListResponse)
+async def list_jobs(
+    title: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    remote: Optional[str] = Query(None),
+    company: Optional[str] = Query(None),
+    source_ats: Optional[str] = Query(None),
+    posted_after: Optional[str] = Query(None),
+    first_seen_after: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    query = {"is_active": True}
+    
+    if title:
+        query["title"] = {"$regex": title, "$options": "i"}
+    if location:
+        query["location"] = {"$regex": location, "$options": "i"}
+    if remote == "true":
+        query["is_remote"] = True
+    elif remote == "false":
+        query["is_remote"] = False
+    if company:
+        slugs = [s.strip() for s in company.split(",")]
+        query["company_slug"] = {"$in": slugs}
+    if source_ats:
+        sources = [s.strip() for s in source_ats.split(",")]
+        query["source_ats"] = {"$in": sources}
+    if posted_after:
+        query["posted_at"] = {"$gte": posted_after}
+    if first_seen_after:
+        query["first_seen_at"] = {"$gte": first_seen_after}
+    
+    total = await db.jobs.count_documents(query)
+    jobs = await db.jobs.find(query, {"_id": 0, "raw": 0, "company_id": 0, "id": 0}).sort("first_seen_at", -1).skip(offset).limit(limit).to_list(limit)
+    
+    return JobsListResponse(
+        data=jobs,
+        meta={"total": total, "limit": limit, "offset": offset}
+    )
+
+@api_router.get("/jobs/new", response_model=JobsListResponse)
+async def list_new_jobs(
+    minutes: int = Query(10, ge=1),
+    title: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    remote: Optional[str] = Query(None),
+    company: Optional[str] = Query(None),
+    source_ats: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    ref_time = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    query = {"is_active": True, "first_seen_at": {"$gte": ref_time}}
+    
+    if title:
+        query["title"] = {"$regex": title, "$options": "i"}
+    if location:
+        query["location"] = {"$regex": location, "$options": "i"}
+    if remote == "true":
+        query["is_remote"] = True
+    elif remote == "false":
+        query["is_remote"] = False
+    if company:
+        slugs = [s.strip() for s in company.split(",")]
+        query["company_slug"] = {"$in": slugs}
+    if source_ats:
+        sources = [s.strip() for s in source_ats.split(",")]
+        query["source_ats"] = {"$in": sources}
+    
+    total = await db.jobs.count_documents(query)
+    jobs = await db.jobs.find(query, {"_id": 0, "raw": 0, "company_id": 0, "id": 0}).sort("first_seen_at", -1).skip(offset).limit(limit).to_list(limit)
+    
+    return JobsListResponse(
+        data=jobs,
+        meta={"total": total, "limit": limit, "offset": offset}
+    )
+
+# --- Stats ---
+
+@api_router.get("/stats")
+async def get_stats():
+    total_jobs = await db.jobs.count_documents({"is_active": True})
+    total_companies = await db.companies.count_documents({"is_active": True})
+    
+    ten_min_ago = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    fresh_jobs = await db.jobs.count_documents({"is_active": True, "first_seen_at": {"$gte": ten_min_ago}})
+    
+    return {"total_jobs": total_jobs, "active_companies": total_companies, "fresh_jobs": fresh_jobs}
+
+# ─── Startup ──────────────────────────────────────────────────────────────────
+
+SEED_COMPANIES = [
+    {"company_slug": "airbnb", "company_name": "Airbnb", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs"},
+    {"company_slug": "figma", "company_name": "Figma", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/figma/jobs"},
+    {"company_slug": "discord", "company_name": "Discord", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/discord/jobs"},
+    {"company_slug": "cloudflare", "company_name": "Cloudflare", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/cloudflare/jobs"},
+    {"company_slug": "stripe", "company_name": "Stripe", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/stripe/jobs"},
+    {"company_slug": "notion", "company_name": "Notion", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/notion/jobs"},
+    {"company_slug": "datadog", "company_name": "Datadog", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/datadog/jobs"},
+    {"company_slug": "hashicorp", "company_name": "HashiCorp", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/hashicorp/jobs"},
+    {"company_slug": "plaid", "company_name": "Plaid", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/plaid/jobs"},
+    {"company_slug": "twitch", "company_name": "Twitch", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/twitch/jobs"},
+    {"company_slug": "netlify", "company_name": "Netlify", "ats_type": "lever", "api_url": "https://api.lever.co/v0/postings/netlify?mode=json"},
+    {"company_slug": "lever", "company_name": "Lever", "ats_type": "lever", "api_url": "https://api.lever.co/v0/postings/lever?mode=json"},
+]
+
+@app.on_event("startup")
+async def startup():
+    # Create indexes
+    await db.jobs.create_index(
+        [("company_slug", 1), ("source_ats", 1), ("job_id", 1)],
+        unique=True
+    )
+    await db.jobs.create_index([("first_seen_at", -1)])
+    await db.jobs.create_index([("is_active", 1)])
+    await db.companies.create_index([("company_slug", 1)], unique=True)
+    
+    # Seed companies if empty
+    count = await db.companies.count_documents({})
+    if count == 0:
+        now = datetime.now(timezone.utc).isoformat()
+        for c in SEED_COMPANIES:
+            doc = {
+                "id": str(uuid.uuid4()),
+                **c,
+                "is_active": True,
+                "created_at": now,
+                "updated_at": now,
+            }
+            try:
+                await db.companies.insert_one(doc)
+            except Exception:
+                pass
+        logger.info(f"Seeded {len(SEED_COMPANIES)} companies")
+
 app.include_router(api_router)
 
 app.add_middleware(
@@ -76,13 +533,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
