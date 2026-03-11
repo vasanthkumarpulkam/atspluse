@@ -228,11 +228,12 @@ def normalize_workday_jobs(company_slug: str, base_url: str, data: dict) -> list
         })
     return normalized
 
-async def fetch_workday_all_pages(api_url: str, company_slug: str, max_pages: int = 10) -> list:
-    """Fetch multiple pages from Workday (they return 20 per page by default)."""
+async def fetch_workday_all_pages(api_url: str, company_slug: str, max_pages: int = 50) -> list:
+    """Fetch multiple pages from Workday (using 200 per page for efficiency)."""
     all_jobs = []
     offset = 0
-    limit = 20
+    limit = 200  # Workday supports up to 200 per request
+    total = 0
     try:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
             for _ in range(max_pages):
@@ -248,7 +249,7 @@ async def fetch_workday_all_pages(api_url: str, company_slug: str, max_pages: in
                     break
         logger.info(f"Workday {company_slug}: fetched {len(all_jobs)} of {total} total jobs")
     except Exception as e:
-        logger.error(f"Failed to fetch Workday jobs for {company_slug}: {e}")
+        logger.error(f"Failed to fetch Workday jobs for {company_slug} at offset {offset}: {e}")
     return all_jobs
 
 async def fetch_and_normalize(company: dict) -> list:
@@ -393,8 +394,11 @@ async def delete_company(company_id: str):
 
 # --- Internal Crawl ---
 
-@api_router.post("/internal/crawl", response_model=CrawlResponse)
-async def trigger_crawl():
+# Global crawl state
+crawl_status = {"running": False, "last_result": None}
+
+async def run_crawl_task():
+    crawl_status["running"] = True
     companies = await db.companies.find({"is_active": True}, {"_id": 0}).to_list(500)
     total_new = 0
     
@@ -407,7 +411,72 @@ async def trigger_crawl():
         except Exception as e:
             logger.error(f"Error crawling {company['company_slug']}: {e}")
     
-    return CrawlResponse(status="ok", companies_processed=len(companies), new_jobs_total=total_new)
+    crawl_status["last_result"] = {
+        "status": "ok",
+        "companies_processed": len(companies),
+        "new_jobs_total": total_new,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    crawl_status["running"] = False
+    logger.info(f"Crawl complete: {len(companies)} companies, {total_new} new jobs")
+
+@api_router.post("/internal/crawl")
+async def trigger_crawl():
+    if crawl_status["running"]:
+        return {"status": "already_running", "companies_processed": 0, "new_jobs_total": 0}
+    
+    asyncio.create_task(run_crawl_task())
+    return {"status": "started", "companies_processed": 0, "new_jobs_total": 0}
+
+@api_router.get("/internal/crawl/status")
+async def get_crawl_status():
+    return {
+        "running": crawl_status["running"],
+        "last_result": crawl_status["last_result"],
+    }
+
+# --- Role Category Patterns (Data/Analytics focused) ---
+
+ROLE_CATEGORIES = {
+    "data_analytics": r"(?i)(data\s*(analyst|analytics|specialist|insights)|analytics\s*(analyst|specialist)|reporting\s*analyst|insights\s*analyst)",
+    "business_intelligence": r"(?i)(business\s*intelligence|BI\s*(analyst|developer|engineer)|power\s*bi|tableau|looker|qlik|microstrategy|data\s*visualization|dashboard\s*(developer|analyst)|reporting\s*developer)",
+    "business_analyst": r"(?i)(business\s*(analyst|systems\s*analyst)|IT\s*business\s*analyst|technical\s*business\s*analyst|functional\s*analyst|systems\s*analyst|ERP\s*analyst|SAP\s*analyst|salesforce\s*analyst|CRM\s*analyst|product\s*(analyst|data\s*analyst))",
+    "financial_fpa": r"(?i)(financial\s*(analyst|planning|data)|finance\s*(analyst|data)|FP&?A\s*analyst|budget\s*analyst|revenue\s*(analyst|operations)|RevOps\s*analyst|pricing\s*analyst|cost\s*analyst|treasury\s*analyst|controller\s*analyst)",
+    "operations_gtm": r"(?i)(operations\s*analyst|business\s*operations|sales\s*(operations|ops)|marketing\s*(operations|analyst)|GTM\s*analyst|go.to.market|supply\s*chain|logistics\s*analyst|workforce\s*(management|analyst)|capacity\s*planning|demand\s*planning|procurement\s*analyst|strategy\s*analyst|planning\s*analyst)",
+    "data_engineering": r"(?i)(data\s*(engineer|pipeline|infrastructure|platform|integration|warehouse)|ETL\s*(developer|analyst|engineer)|analytics\s*engineer|database\s*(analyst|developer)|SQL\s*(developer|analyst)|snowflake\s*developer|dbt\s*developer|databricks)",
+    "compliance_governance": r"(?i)(compliance\s*(analyst|data)|regulatory\s*analyst|data\s*(governance|quality|steward|management)|master\s*data|MDM\s*analyst|information\s*analyst|records\s*analyst|risk\s*(analyst|data)|audit\s*analyst|internal\s*audit)",
+    "all_data_roles": None,  # Combined pattern built below
+}
+
+# Build combined "all" pattern
+_all_patterns = [v for v in ROLE_CATEGORIES.values() if v is not None]
+ROLE_CATEGORIES["all_data_roles"] = "|".join(f"({p})" for p in _all_patterns)
+
+# --- US Location Filter ---
+
+US_STATES_ABBR = "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC"
+US_CITIES = "New York|San Francisco|Los Angeles|Chicago|Seattle|Austin|Boston|Denver|Atlanta|Dallas|Houston|Miami|Phoenix|Portland|San Diego|San Jose|Minneapolis|Detroit|Philadelphia|Charlotte|Nashville|Raleigh|Salt Lake|Tampa|Orlando|Pittsburgh|Columbus|Indianapolis|Kansas City|Palo Alto|Mountain View|Sunnyvale|Cupertino|Menlo Park|Santa Clara|Redwood City|Cambridge|Brooklyn|Manhattan|Burbank|Glendale|Celebration|Lake Buena Vista|Kissimmee|Manassas|McLean|Tysons|Herndon|Reston|Arlington|Bethesda|Plano|Irving|Frisco|Round Rock|Durham|Madison|Ann Arbor|Boulder|Irvine|Santa Monica|Bellevue|Redmond|Scottsdale|Tempe|San Antonio|Sacramento|Oakland|Berkeley|Fremont|Milpitas"
+US_STATES_FULL = "Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming"
+
+US_LOCATION_PATTERN = (
+    f"(?i)"
+    f"(\\bUSA\\b|United States|\\bU\\.S\\.|\\bUS\\b[,\\s\\)])"
+    f"|\\b({US_STATES_ABBR}),?\\s*(USA|$)"
+    f"|({US_CITIES})"
+    f"|(Remote.*US|US.*Remote|Remote.*USA|USA.*Remote|Remote \\(US\\))"
+    f"|(North America|AMER\\b)"
+    f"|({US_STATES_FULL})"
+    f"|(\\w+,\\s*({US_STATES_ABBR})\\b)"
+)
+
+def apply_us_filter(query: dict, us_only: str):
+    if us_only != "true":
+        return
+    us_cond = {"location": {"$regex": US_LOCATION_PATTERN}}
+    if "$and" in query:
+        query["$and"].append(us_cond)
+    else:
+        query.setdefault("$and", []).append(us_cond)
 
 # --- Jobs ---
 
@@ -420,12 +489,24 @@ async def list_jobs(
     source_ats: Optional[str] = Query(None),
     posted_after: Optional[str] = Query(None),
     first_seen_after: Optional[str] = Query(None),
+    role_category: Optional[str] = Query(None),
+    us_only: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     query = {"is_active": True}
     
-    if title:
+    if role_category and role_category in ROLE_CATEGORIES:
+        pattern = ROLE_CATEGORIES[role_category]
+        if pattern:
+            query["title"] = {"$regex": pattern}
+            if title:
+                query["$and"] = [
+                    {"title": {"$regex": pattern}},
+                    {"title": {"$regex": title, "$options": "i"}},
+                ]
+                del query["title"]
+    elif title:
         query["title"] = {"$regex": title, "$options": "i"}
     if location:
         query["location"] = {"$regex": location, "$options": "i"}
@@ -444,6 +525,8 @@ async def list_jobs(
     if first_seen_after:
         query["first_seen_at"] = {"$gte": first_seen_after}
     
+    apply_us_filter(query, us_only)
+    
     total = await db.jobs.count_documents(query)
     jobs = await db.jobs.find(query, {"_id": 0, "raw": 0, "company_id": 0, "id": 0}).sort("first_seen_at", -1).skip(offset).limit(limit).to_list(limit)
     
@@ -460,13 +543,25 @@ async def list_new_jobs(
     remote: Optional[str] = Query(None),
     company: Optional[str] = Query(None),
     source_ats: Optional[str] = Query(None),
+    role_category: Optional[str] = Query(None),
+    us_only: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     ref_time = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
     query = {"is_active": True, "first_seen_at": {"$gte": ref_time}}
     
-    if title:
+    if role_category and role_category in ROLE_CATEGORIES:
+        pattern = ROLE_CATEGORIES[role_category]
+        if pattern:
+            query["title"] = {"$regex": pattern}
+            if title:
+                query["$and"] = [
+                    {"title": {"$regex": pattern}},
+                    {"title": {"$regex": title, "$options": "i"}},
+                ]
+                del query["title"]
+    elif title:
         query["title"] = {"$regex": title, "$options": "i"}
     if location:
         query["location"] = {"$regex": location, "$options": "i"}
@@ -480,6 +575,8 @@ async def list_new_jobs(
     if source_ats:
         sources = [s.strip() for s in source_ats.split(",")]
         query["source_ats"] = {"$in": sources}
+    
+    apply_us_filter(query, us_only)
     
     total = await db.jobs.count_documents(query)
     jobs = await db.jobs.find(query, {"_id": 0, "raw": 0, "company_id": 0, "id": 0}).sort("first_seen_at", -1).skip(offset).limit(limit).to_list(limit)
@@ -501,6 +598,21 @@ async def get_stats():
     
     return {"total_jobs": total_jobs, "active_companies": total_companies, "fresh_jobs": fresh_jobs}
 
+@api_router.get("/role-categories")
+async def get_role_categories():
+    return {
+        "categories": [
+            {"key": "all_data_roles", "label": "All Data/Analytics Roles"},
+            {"key": "data_analytics", "label": "Data / Analytics"},
+            {"key": "business_intelligence", "label": "Business Intelligence"},
+            {"key": "business_analyst", "label": "Business Analyst"},
+            {"key": "financial_fpa", "label": "Financial / FP&A"},
+            {"key": "operations_gtm", "label": "Operations / GTM"},
+            {"key": "data_engineering", "label": "Data Engineering / ETL"},
+            {"key": "compliance_governance", "label": "Compliance / Governance"},
+        ]
+    }
+
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 SEED_COMPANIES = [
@@ -521,11 +633,25 @@ SEED_COMPANIES = [
     # Ashby
     {"company_slug": "ramp", "company_name": "Ramp", "ats_type": "ashby", "api_url": "https://api.ashbyhq.com/posting-api/job-board/ramp"},
     {"company_slug": "linear", "company_name": "Linear", "ats_type": "ashby", "api_url": "https://api.ashbyhq.com/posting-api/job-board/linear"},
-    # Workday
-    {"company_slug": "adobe", "company_name": "Adobe", "ats_type": "workday", "api_url": "https://adobe.wd5.myworkdayjobs.com/wday/cxs/adobe/external_experienced/jobs"},
+    # Workday (18 verified working endpoints)
+    {"company_slug": "walmart", "company_name": "Walmart", "ats_type": "workday", "api_url": "https://walmart.wd5.myworkdayjobs.com/wday/cxs/walmart/WalmartExternal/jobs"},
+    {"company_slug": "nvidia", "company_name": "NVIDIA", "ats_type": "workday", "api_url": "https://nvidia.wd5.myworkdayjobs.com/wday/cxs/nvidia/NVIDIAExternalCareerSite/jobs"},
     {"company_slug": "capitalone", "company_name": "Capital One", "ats_type": "workday", "api_url": "https://capitalone.wd12.myworkdayjobs.com/wday/cxs/capitalone/Capital_One/jobs"},
     {"company_slug": "bah", "company_name": "Booz Allen Hamilton", "ats_type": "workday", "api_url": "https://bah.wd1.myworkdayjobs.com/wday/cxs/bah/BAH_Jobs/jobs"},
+    {"company_slug": "amgen", "company_name": "Amgen", "ats_type": "workday", "api_url": "https://amgen.wd1.myworkdayjobs.com/wday/cxs/amgen/Careers/jobs"},
+    {"company_slug": "adobe", "company_name": "Adobe", "ats_type": "workday", "api_url": "https://adobe.wd5.myworkdayjobs.com/wday/cxs/adobe/external_experienced/jobs"},
+    {"company_slug": "comcast", "company_name": "Comcast", "ats_type": "workday", "api_url": "https://comcast.wd5.myworkdayjobs.com/wday/cxs/comcast/Comcast_Careers/jobs"},
+    {"company_slug": "pfizer", "company_name": "Pfizer", "ats_type": "workday", "api_url": "https://pfizer.wd1.myworkdayjobs.com/wday/cxs/pfizer/PfizerCareers/jobs"},
+    {"company_slug": "disney", "company_name": "Disney", "ats_type": "workday", "api_url": "https://disney.wd5.myworkdayjobs.com/wday/cxs/disney/disneycareer/jobs"},
+    {"company_slug": "paypal", "company_name": "PayPal", "ats_type": "workday", "api_url": "https://paypal.wd1.myworkdayjobs.com/wday/cxs/paypal/jobs/jobs"},
+    {"company_slug": "dell", "company_name": "Dell Technologies", "ats_type": "workday", "api_url": "https://dell.wd1.myworkdayjobs.com/wday/cxs/dell/External/jobs"},
+    {"company_slug": "intel", "company_name": "Intel", "ats_type": "workday", "api_url": "https://intel.wd1.myworkdayjobs.com/wday/cxs/intel/External/jobs"},
+    {"company_slug": "unilever", "company_name": "Unilever", "ats_type": "workday", "api_url": "https://unilever.wd3.myworkdayjobs.com/wday/cxs/unilever/Unilever_Experienced_Professionals/jobs"},
+    {"company_slug": "workday-hq", "company_name": "Workday", "ats_type": "workday", "api_url": "https://workday.wd5.myworkdayjobs.com/wday/cxs/workday/Workday/jobs"},
     {"company_slug": "broadcom", "company_name": "Broadcom", "ats_type": "workday", "api_url": "https://broadcom.wd1.myworkdayjobs.com/wday/cxs/broadcom/External_Career/jobs"},
+    {"company_slug": "zoom", "company_name": "Zoom", "ats_type": "workday", "api_url": "https://zoom.wd5.myworkdayjobs.com/wday/cxs/zoom/Zoom/jobs"},
+    {"company_slug": "swift", "company_name": "Swift", "ats_type": "workday", "api_url": "https://swift.wd3.myworkdayjobs.com/wday/cxs/swift/Join-Swift/jobs"},
+    {"company_slug": "capgroup", "company_name": "Capital Group", "ats_type": "workday", "api_url": "https://capgroup.wd1.myworkdayjobs.com/wday/cxs/capgroup/capitalgroupcareers/jobs"},
 ]
 
 @app.on_event("startup")

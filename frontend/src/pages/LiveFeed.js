@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import axios from "axios";
 import { formatDistanceToNow, parseISO, isAfter, subMinutes } from "date-fns";
 import {
-  Search, ExternalLink, MapPin, RefreshCw, Wifi, Clock, Loader2, ChevronLeft, ChevronRight, Zap
+  Search, ExternalLink, MapPin, RefreshCw, Wifi, Clock, Loader2, ChevronLeft, ChevronRight, Zap, Briefcase, Flag
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,18 @@ import { toast } from "sonner";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
+const ROLE_CATEGORIES = [
+  { key: "none", label: "All Jobs" },
+  { key: "all_data_roles", label: "All Data/Analytics Roles" },
+  { key: "data_analytics", label: "Data / Analytics" },
+  { key: "business_intelligence", label: "Business Intelligence" },
+  { key: "business_analyst", label: "Business Analyst" },
+  { key: "financial_fpa", label: "Financial / FP&A" },
+  { key: "operations_gtm", label: "Operations / GTM" },
+  { key: "data_engineering", label: "Data Engineering / ETL" },
+  { key: "compliance_governance", label: "Compliance / Governance" },
+];
+
 export default function LiveFeed() {
   const [jobs, setJobs] = useState([]);
   const [meta, setMeta] = useState({ total: 0, limit: 50, offset: 0 });
@@ -27,6 +39,8 @@ export default function LiveFeed() {
   const [search, setSearch] = useState("");
   const [remoteFilter, setRemoteFilter] = useState("all");
   const [timeWindow, setTimeWindow] = useState("all");
+  const [roleCategory, setRoleCategory] = useState("none");
+  const [usOnly, setUsOnly] = useState(true);
   const [loading, setLoading] = useState(false);
   const [crawling, setCrawling] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
@@ -41,6 +55,8 @@ export default function LiveFeed() {
       if (search) params.append("title", search);
       if (remoteFilter === "remote") params.append("remote", "true");
       if (remoteFilter === "onsite") params.append("remote", "false");
+      if (roleCategory !== "none") params.append("role_category", roleCategory);
+      if (usOnly) params.append("us_only", "true");
 
       if (timeWindow !== "all") {
         const now = new Date();
@@ -64,7 +80,7 @@ export default function LiveFeed() {
     } finally {
       setLoading(false);
     }
-  }, [search, remoteFilter, timeWindow]);
+  }, [search, remoteFilter, timeWindow, roleCategory, usOnly]);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -79,12 +95,29 @@ export default function LiveFeed() {
     setCrawling(true);
     try {
       const res = await axios.post(`${API}/internal/crawl`);
-      toast.success(`Crawl complete: ${res.data.companies_processed} companies, ${res.data.new_jobs_total} new jobs`);
-      fetchJobs(page);
-      fetchStats();
+      if (res.data.status === "already_running") {
+        toast.info("Crawl already in progress...");
+      } else {
+        toast.success("Crawl started! Fetching jobs in background...");
+      }
+      // Poll crawl status
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await axios.get(`${API}/internal/crawl/status`);
+          if (!statusRes.data.running) {
+            clearInterval(pollInterval);
+            setCrawling(false);
+            const result = statusRes.data.last_result;
+            if (result) {
+              toast.success(`Crawl complete: ${result.companies_processed} companies, ${result.new_jobs_total} new jobs`);
+            }
+            fetchJobs(page);
+            fetchStats();
+          }
+        } catch { /* ignore poll errors */ }
+      }, 3000);
     } catch (e) {
-      toast.error("Crawl failed");
-    } finally {
+      toast.error("Crawl failed to start");
       setCrawling(false);
     }
   };
@@ -108,7 +141,7 @@ export default function LiveFeed() {
 
   useEffect(() => {
     setPage(0);
-  }, [search, remoteFilter, timeWindow]);
+  }, [search, remoteFilter, timeWindow, roleCategory, usOnly]);
 
   const isFresh = (firstSeenAt) => {
     if (!firstSeenAt) return false;
@@ -258,12 +291,53 @@ export default function LiveFeed() {
             </SelectContent>
           </Select>
 
-          {(search || remoteFilter !== "all" || timeWindow !== "all") && (
+          <Select
+            value={roleCategory}
+            onValueChange={setRoleCategory}
+          >
+            <SelectTrigger
+              data-testid="role-category-filter"
+              className="w-[220px] bg-zinc-900 border-zinc-800 text-zinc-100 h-9"
+            >
+              <Briefcase className="w-3.5 h-3.5 mr-2 text-zinc-500" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="bg-zinc-900 border-zinc-800">
+              {ROLE_CATEGORIES.map((cat) => (
+                <SelectItem key={cat.key} value={cat.key}>
+                  {cat.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                data-testid="us-only-toggle"
+                variant={usOnly ? "default" : "outline"}
+                size="sm"
+                onClick={() => setUsOnly(!usOnly)}
+                className={usOnly
+                  ? "bg-blue-600 hover:bg-blue-500 text-white h-9 px-3 gap-1.5"
+                  : "border-zinc-700 text-zinc-400 hover:bg-zinc-800 h-9 px-3 gap-1.5"
+                }
+              >
+                <Flag className="w-3.5 h-3.5" />
+                US Only
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p>{usOnly ? "Showing US jobs only. Click to show all." : "Showing all countries. Click for US only."}</p>
+            </TooltipContent>
+          </Tooltip>
+
+          {(search || remoteFilter !== "all" || timeWindow !== "all" || roleCategory !== "none" || !usOnly) && (
             <Button
               data-testid="clear-filters-button"
               variant="ghost"
               size="sm"
-              onClick={() => { setSearch(""); setRemoteFilter("all"); setTimeWindow("all"); }}
+              onClick={() => { setSearch(""); setRemoteFilter("all"); setTimeWindow("all"); setRoleCategory("none"); setUsOnly(true); }}
               className="text-zinc-400 hover:text-zinc-100"
             >
               Clear
