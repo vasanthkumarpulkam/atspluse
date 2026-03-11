@@ -1,0 +1,192 @@
+{
+  "identity": {
+    "name": "E1",
+    "role": "Creative Designer",
+    "tone": "Professional, Minimalist, Data-Dense, High-Performance",
+    "aesthetic": "Swiss High-Contrast Dark Mode",
+    "principles": [
+      "Fusion over Imitation: Mix Swiss precision with Developer Tool utility.",
+      "Content is King: Data density without clutter.",
+      "Negative Space: Use breathing room to separate dense data clusters.",
+      "Contrast: High contrast for readability in dark mode.",
+      "No Inter for Headings: Use Manrope for character."
+    ]
+  },
+  "brand": {
+    "name": "ATS Pulse",
+    "logo_text": "ATS_PULSE",
+    "primary_color": "#6366f1",
+    "accent_color": "#10b981",
+    "theme": "dark"
+  },
+  "design_system": {
+    "colors": {
+      "background": "#09090b",
+      "surface": "#18181b",
+      "surface_highlight": "#27272a",
+      "border": "#27272a",
+      "text_primary": "#f4f4f5",
+      "text_secondary": "#a1a1aa",
+      "text_tertiary": "#71717a",
+      "primary": "#6366f1",
+      "primary_foreground": "#ffffff",
+      "success": "#10b981",
+      "success_dim": "rgba(16, 185, 129, 0.1)",
+      "warning": "#f59e0b",
+      "error": "#ef4444"
+    },
+    "typography": {
+      "font_family_heading": "Manrope, sans-serif",
+      "font_family_body": "IBM Plex Sans, sans-serif",
+      "font_family_mono": "JetBrains Mono, monospace",
+      "weights": {
+        "light": 300,
+        "regular": 400,
+        "medium": 500,
+        "semibold": 600,
+        "bold": 700
+      },
+      "sizes": {
+        "xs": "0.75rem",
+        "sm": "0.875rem",
+        "base": "1rem",
+        "lg": "1.125rem",
+        "xl": "1.25rem",
+        "2xl": "1.5rem",
+        "3xl": "1.875rem",
+        "4xl": "2.25rem"
+      }
+    },
+    "spacing": {
+      "container_padding": "p-6 md:p-8 lg:p-12",
+      "section_gap": "gap-8",
+      "item_gap": "gap-4",
+      "dense_gap": "gap-2"
+    },
+    "radius": {
+      "default": "rounded-md",
+      "button": "rounded-md",
+      "input": "rounded-md",
+      "card": "rounded-lg"
+    },
+    "shadows": {
+      "card": "shadow-sm",
+      "popover": "shadow-lg",
+      "focus": "ring-2 ring-indigo-500/50"
+    },
+    "visual_enhancers": {
+      "glassmorphism": "backdrop-blur-md bg-zinc-950/70 border-b border-white/5",
+      "grid_pattern": "bg-[linear-gradient(to_right,#80808012_1px,transparent_1px),linear-gradient(to_bottom,#80808012_1px,transparent_1px)] bg-[size:24px_24px]",
+      "glow": "shadow-[0_0_15px_rgba(99,102,241,0.3)]"
+    }
+  },
+  "layout_strategy": {
+    "type": "Dashboard",
+    "grid_system": "Bento Grid (Mode B - High Density)",
+    "container_max_width": "max-w-[1600px]",
+    "alignment": "Left-aligned content, Center-aligned container",
+    "sidebar": {
+      "width": "w-64",
+      "style": "Fixed, Border-r border-white/5 bg-zinc-950"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-indigo-600 hover:bg-indigo-500 text-white shadow-sm transition-all",
+      "secondary": "bg-white/5 hover:bg-white/10 text-zinc-100 border border-white/10",
+      "ghost": "hover:bg-white/5 text-zinc-400 hover:text-zinc-100",
+      "outline": "border border-zinc-700 bg-transparent hover:bg-zinc-800 text-zinc-100"
+    },
+    "inputs": {
+      "style": "bg-zinc-900 border-zinc-800 text-zinc-100 placeholder:text-zinc-500 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500",
+      "height": "h-9"
+    },
+    "cards": {
+      "style": "bg-zinc-900/50 border border-white/5 hover:border-white/10 transition-colors"
+    },
+    "table": {
+      "header": "bg-zinc-900/50 text-zinc-400 uppercase text-xs tracking-wider font-medium border-b border-white/5",
+      "row": "border-b border-white/5 hover:bg-white/5 transition-colors group",
+      "cell": "py-2 px-4 text-sm text-zinc-300 font-normal",
+      "highlighted_row": "bg-emerald-500/5 border-l-2 border-emerald-500"
+    },
+    "badges": {
+      "default": "bg-zinc-800 text-zinc-300 border-zinc-700",
+      "success": "bg-emerald-500/10 text-emerald-400 border-emerald-500/20",
+      "warning": "bg-amber-500/10 text-amber-400 border-amber-500/20",
+      "outline": "border border-zinc-700 text-zinc-400"
+    }
+  },
+  "pages": {
+    "dashboard": {
+      "path": "/",
+      "title": "Live Feed",
+      "layout": "Full width with sidebar",
+      "sections": [
+        {
+          "name": "Header",
+          "elements": ["Title", "Stats Summary (Jobs Polled, Fresh Jobs, Active Companies)", "Auto-refresh Toggle"]
+        },
+        {
+          "name": "Filters Toolbar",
+          "elements": ["Search Input", "Remote Toggle", "Time Window Select", "Clear Filters Button"]
+        },
+        {
+          "name": "Job Table",
+          "style": "High density, infinite scroll or pagination",
+          "columns": ["Title", "Company", "Location", "Posted", "Source", "Actions"]
+        }
+      ]
+    },
+    "companies": {
+      "path": "/companies",
+      "title": "Companies",
+      "layout": "Full width with sidebar",
+      "sections": [
+        {
+          "name": "Header",
+          "elements": ["Title", "Add Company Button"]
+        },
+        {
+          "name": "Company List",
+          "style": "Grid of Cards or Table",
+          "card_elements": ["Logo/Avatar", "Name", "Slug", "ATS Type", "Status Toggle", "Last Polled"]
+        }
+      ]
+    }
+  },
+  "assets": {
+    "icons_library": "lucide-react",
+    "installation_commands": [
+      "yarn add lucide-react",
+      "yarn add @radix-ui/react-icons",
+      "yarn add date-fns",
+      "yarn add framer-motion",
+      "yarn add clsx tailwind-merge"
+    ],
+    "image_urls": {
+      "abstract_background": "https://images.unsplash.com/photo-1737505598998-693328b57ae3?crop=entropy&cs=srgb&fm=jpg&q=85",
+      "tech_texture": "https://images.unsplash.com/photo-1670529275215-d952f9633a4d?crop=entropy&cs=srgb&fm=jpg&q=85"
+    }
+  },
+  "universal_guidelines": [
+    "Do not use gradients for dark backgrounds; use solid zinc-950 or zinc-900.",
+    "Use 'manrope' font for all headings (h1-h6).",
+    "Use 'ibm-plex-sans' for body text.",
+    "Use 'jetbrains-mono' for all IDs, dates, and code snippets.",
+    "Ensure 3x padding in containers (e.g., p-8 instead of p-4).",
+    "Add data-testid to all interactive elements.",
+    "Use 'sonner' for toast notifications.",
+    "For the 'Fresh' job highlight, use a subtle left border (border-l-2 border-emerald-500) and a very faint background tint (bg-emerald-500/5).",
+    "Do not center text in the dashboard; keep it left-aligned for scannability.",
+    "Use 'lucide-react' for icons.",
+    "Implement 'framer-motion' for subtle row entrance animations."
+  ],
+  "instructions_to_main_agent": {
+    "step_1": "Install dependencies: lucide-react, date-fns, framer-motion, clsx, tailwind-merge.",
+    "step_2": "Update tailwind.config.js to include the custom colors (zinc, indigo, emerald) and fonts.",
+    "step_3": "Create a layout wrapper with a sidebar and top bar.",
+    "step_4": "Implement the 'JobCard' or 'JobRow' component with the 'Fresh' highlight logic.",
+    "step_5": "Build the 'Companies' management page with a clean list/card view."
+  }
+}
