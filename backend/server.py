@@ -187,36 +187,69 @@ def normalize_ashby_jobs(company_slug: str, data: dict) -> list:
         })
     return normalized
 
-def normalize_workday_jobs(company_slug: str, data: dict) -> list:
+def normalize_workday_jobs(company_slug: str, base_url: str, data: dict) -> list:
     job_postings = data.get("jobPostings", [])
     normalized = []
+    # Extract base site URL for building job links
+    # e.g. https://adobe.wd5.myworkdayjobs.com/wday/cxs/adobe/external_experienced/jobs
+    # -> https://adobe.wd5.myworkdayjobs.com/en-US/external_experienced
+    parts = base_url.split("/wday/cxs/")
+    site_base = parts[0] if parts else ""
+    board_path = parts[1].split("/jobs")[0] if len(parts) > 1 else ""
+    # board_path like "adobe/external_experienced" -> take the part after company slug
+    board_segments = board_path.split("/", 1)
+    board_name = board_segments[1] if len(board_segments) > 1 else board_segments[0]
+    
     for job in job_postings:
         loc = job.get("locationsText", "") or ""
-        if not loc:
-            locs = job.get("locations", [])
-            if locs:
-                loc = ", ".join(locs) if isinstance(locs, list) else str(locs)
+        is_remote = "remote" in loc.lower()
         
-        is_remote = job.get("remote", False) or ("remote" in loc.lower())
+        posted_on = job.get("postedOn", "")
         
-        posted_at = job.get("postedOn") or job.get("posted")
+        external_path = job.get("externalPath", "")
+        job_url = f"{site_base}/en-US/{board_name}{external_path}" if external_path else ""
         
-        external_url = job.get("externalUrl", "") or job.get("externalPath", "")
+        # Use bulletFields[0] as job_id (Workday requisition ID)
+        bullet = job.get("bulletFields", [])
+        job_id = str(bullet[0]) if bullet else str(hash(job.get("title", "") + loc))
         
         normalized.append({
             "source_ats": "workday",
             "company_slug": company_slug,
-            "job_id": str(job.get("bulletFields", [job.get("id", "")])[0] if job.get("bulletFields") else job.get("id", "")),
+            "job_id": job_id,
             "title": job.get("title", ""),
             "location": loc,
             "is_remote": is_remote,
             "department": None,
             "employment_type": None,
-            "posted_at": posted_at,
-            "job_url": external_url,
+            "posted_at": posted_on if posted_on and posted_on != "Posted Today" else None,
+            "job_url": job_url,
             "raw": job,
         })
     return normalized
+
+async def fetch_workday_all_pages(api_url: str, company_slug: str, max_pages: int = 10) -> list:
+    """Fetch multiple pages from Workday (they return 20 per page by default)."""
+    all_jobs = []
+    offset = 0
+    limit = 20
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
+            for _ in range(max_pages):
+                payload = {"limit": limit, "offset": offset, "appliedFacets": {}, "searchText": ""}
+                resp = await http_client.post(api_url, json=payload, headers={"Content-Type": "application/json", "Accept": "application/json"})
+                resp.raise_for_status()
+                data = resp.json()
+                postings = data.get("jobPostings", [])
+                all_jobs.extend(normalize_workday_jobs(company_slug, api_url, data))
+                total = data.get("total", 0)
+                offset += limit
+                if offset >= total or len(postings) == 0:
+                    break
+        logger.info(f"Workday {company_slug}: fetched {len(all_jobs)} of {total} total jobs")
+    except Exception as e:
+        logger.error(f"Failed to fetch Workday jobs for {company_slug}: {e}")
+    return all_jobs
 
 async def fetch_and_normalize(company: dict) -> list:
     ats_type = company["ats_type"]
@@ -224,17 +257,7 @@ async def fetch_and_normalize(company: dict) -> list:
     slug = company["company_slug"]
     
     if ats_type == "workday":
-        # Workday uses POST requests
-        try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as http_client:
-                payload = {"limit": 20, "offset": 0, "appliedFacets": {}, "searchText": ""}
-                resp = await http_client.post(api_url, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                return normalize_workday_jobs(slug, data)
-        except Exception as e:
-            logger.error(f"Failed to fetch Workday jobs for {slug}: {e}")
-            return []
+        return await fetch_workday_all_pages(api_url, slug)
     
     data = await fetch_with_retry(api_url)
     if data is None:
@@ -481,6 +504,7 @@ async def get_stats():
 # ─── Startup ──────────────────────────────────────────────────────────────────
 
 SEED_COMPANIES = [
+    # Greenhouse
     {"company_slug": "airbnb", "company_name": "Airbnb", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/airbnb/jobs"},
     {"company_slug": "figma", "company_name": "Figma", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/figma/jobs"},
     {"company_slug": "discord", "company_name": "Discord", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/discord/jobs"},
@@ -491,8 +515,17 @@ SEED_COMPANIES = [
     {"company_slug": "hashicorp", "company_name": "HashiCorp", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/hashicorp/jobs"},
     {"company_slug": "plaid", "company_name": "Plaid", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/plaid/jobs"},
     {"company_slug": "twitch", "company_name": "Twitch", "ats_type": "greenhouse", "api_url": "https://boards-api.greenhouse.io/v1/boards/twitch/jobs"},
+    # Lever
     {"company_slug": "netlify", "company_name": "Netlify", "ats_type": "lever", "api_url": "https://api.lever.co/v0/postings/netlify?mode=json"},
     {"company_slug": "lever", "company_name": "Lever", "ats_type": "lever", "api_url": "https://api.lever.co/v0/postings/lever?mode=json"},
+    # Ashby
+    {"company_slug": "ramp", "company_name": "Ramp", "ats_type": "ashby", "api_url": "https://api.ashbyhq.com/posting-api/job-board/ramp"},
+    {"company_slug": "linear", "company_name": "Linear", "ats_type": "ashby", "api_url": "https://api.ashbyhq.com/posting-api/job-board/linear"},
+    # Workday
+    {"company_slug": "adobe", "company_name": "Adobe", "ats_type": "workday", "api_url": "https://adobe.wd5.myworkdayjobs.com/wday/cxs/adobe/external_experienced/jobs"},
+    {"company_slug": "capitalone", "company_name": "Capital One", "ats_type": "workday", "api_url": "https://capitalone.wd12.myworkdayjobs.com/wday/cxs/capitalone/Capital_One/jobs"},
+    {"company_slug": "bah", "company_name": "Booz Allen Hamilton", "ats_type": "workday", "api_url": "https://bah.wd1.myworkdayjobs.com/wday/cxs/bah/BAH_Jobs/jobs"},
+    {"company_slug": "broadcom", "company_name": "Broadcom", "ats_type": "workday", "api_url": "https://broadcom.wd1.myworkdayjobs.com/wday/cxs/broadcom/External_Career/jobs"},
 ]
 
 @app.on_event("startup")

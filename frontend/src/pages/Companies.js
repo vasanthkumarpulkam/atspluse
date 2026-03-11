@@ -40,9 +40,9 @@ const ATS_PLATFORMS = [
   {
     key: "ashby",
     name: "Ashby",
-    pattern: "https://api.ashbyhq.com/posting-public/job-board/{company}",
+    pattern: "https://api.ashbyhq.com/posting-api/job-board/{company}",
     color: "violet",
-    buildUrl: (slug) => `https://api.ashbyhq.com/posting-public/job-board/${slug}`,
+    buildUrl: (slug) => `https://api.ashbyhq.com/posting-api/job-board/${slug}`,
   },
   {
     key: "workday",
