@@ -2,6 +2,7 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Layout from "@/components/Layout";
 import LiveFeed from "@/pages/LiveFeed";
+import FreshJobs from "@/pages/FreshJobs";
 import Companies from "@/pages/Companies";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -12,6 +13,7 @@ function App() {
         <Layout>
           <Routes>
             <Route path="/" element={<LiveFeed />} />
+            <Route path="/fresh" element={<FreshJobs />} />
             <Route path="/companies" element={<Companies />} />
           </Routes>
         </Layout>

@@ -1,9 +1,10 @@
 import { NavLink } from "react-router-dom";
-import { Activity, Building2, Radio } from "lucide-react";
+import { Activity, Building2, Radio, Flame } from "lucide-react";
 
 export default function Sidebar() {
   const links = [
     { to: "/", label: "Live Feed", icon: Radio },
+    { to: "/fresh", label: "Fresh Jobs", icon: Flame },
     { to: "/companies", label: "Companies", icon: Building2 },
   ];
 
